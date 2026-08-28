@@ -22,26 +22,29 @@ MUTED = (161, 169, 184)
 ACCENT = (83, 152, 255)
 TRACK = (107, 114, 128)
 BUCKET_RIM = (210, 216, 228)
+GOLD = (244, 198, 76)
 
 CANVAS_RECT = pygame.Rect(120, 105, 1000, 555)
 TRACK_RECT = pygame.Rect(10, 680, 1220, 78)
+SHOP_RECT = pygame.Rect(770, 772, 450, 116)
 
-# The source image is merged into at most this many simulation cells.
 MAX_GRID_W = 190
 MAX_GRID_H = 120
 MIN_CELL_SIZE = 3
 MAX_CELL_SIZE = 6
 
 SCOOP_ROWS = 5
-MAX_BUCKETS = 3
-BUCKET_SPEED = 66.0
+BASE_MAX_BUCKETS = 2
+MAX_BUCKET_LIMIT = 8
+BASE_BUCKET_CAPACITY = 100
+BASE_BUCKET_SPEED = 66.0
 BUCKET_GAP = 14
 SCOOP_INTERVAL = 0.040
 
-DEFAULT_TOLERANCE = 40
-TOLERANCE_STEP = 10
-MIN_TOLERANCE = 0
-MAX_TOLERANCE = 180
+DEFAULT_TOLERANCE = 50
+
+SHOP_BASE_PRICE = 20
+EXTRA_BUCKET_PRICE_MULTIPLIER = 10
 
 Color = tuple[int, int, int]
 
@@ -110,7 +113,6 @@ class ColorBucketButton:
         pygame.draw.circle(surface, fill, self.center, self.radius - 7)
         pygame.draw.circle(surface, BUCKET_RIM, self.center, self.radius - 7, 2)
 
-        # Tiny bucket cues inside the color circle: rim and handle.
         pygame.draw.line(surface, BUCKET_RIM, (cx - 15, cy - 9), (cx + 15, cy - 9), 4)
         handle_rect = pygame.Rect(cx - 15, cy - 25, 30, 25)
         pygame.draw.arc(surface, BUCKET_RIM, handle_rect, math.pi, 2 * math.pi, 3)
@@ -124,7 +126,7 @@ class Bucket:
     height: int
     capacity: int
     target_color: Color
-    speed: float = BUCKET_SPEED
+    speed: float
     fill: int = 0
     loops: int = 0
     waiting_for_wrap: bool = False
@@ -188,9 +190,6 @@ class SandPicture:
         image = pygame.image.load(path).convert_alpha()
         width, height = image.get_size()
         grid_w, grid_h = self._fit_grid(width, height)
-
-        # smoothscale averages source pixels when shrinking. That gives us a simple
-        # pixel-merging pass and keeps the number of simulated grains bounded.
         merged = pygame.transform.smoothscale(image, (grid_w, grid_h))
 
         available_w = CANVAS_RECT.width - 60
@@ -232,8 +231,6 @@ class SandPicture:
         if not self.loaded or not self.physics_active:
             return
 
-        # Bottom-up falling-sand cellular automaton. Each grain tries down first,
-        # then one of the two diagonals. Random scan/direction avoids a strong bias.
         for y in range(self.grid_h - 2, -1, -1):
             xs = range(self.grid_w) if random.random() < 0.5 else range(self.grid_w - 1, -1, -1)
             for x in xs:
@@ -259,12 +256,7 @@ class SandPicture:
         if not self.loaded:
             return []
         y0 = max(0, self.grid_h - rows)
-        return [
-            color
-            for row in self.grid[y0:]
-            for color in row
-            if color is not None
-        ]
+        return [color for row in self.grid[y0:] for color in row if color is not None]
 
     def matching_count(self, target: Color, tolerance: int) -> int:
         return sum(
@@ -278,7 +270,6 @@ class SandPicture:
         if not self.loaded or bucket.full:
             return 0
 
-        # Map the bucket mouth from screen pixels to sand-grid columns.
         bx0 = max(bucket.rect.left, self.pixel_rect.left)
         bx1 = min(bucket.rect.right, self.pixel_rect.right)
         if bx0 >= bx1:
@@ -332,7 +323,14 @@ class SandGame:
         self.buckets: list[Bucket] = []
         self.pending_colors: list[Color] = []
         self.choice_colors: list[Optional[Color]] = [None, None, None]
+
+        self.gold = 0
         self.tolerance = DEFAULT_TOLERANCE
+        self.bucket_speed = BASE_BUCKET_SPEED
+        self.max_buckets = BASE_MAX_BUCKETS
+        self.bucket_capacity = BASE_BUCKET_CAPACITY
+        self.shop_levels = {"tolerance": 0, "speed": 0, "buckets": 0, "capacity": 0}
+
         self.status = "Upload or drag-and-drop an image to begin."
         self.physics_accum = 0.0
         self.scoop_accum = 0.0
@@ -340,13 +338,20 @@ class SandGame:
 
         self.upload_button = Button(pygame.Rect(50, 28, 170, 50), "Upload image")
         self.reset_button = Button(pygame.Rect(235, 28, 120, 50), "Reset", enabled=False)
-        self.tolerance_minus = Button(pygame.Rect(815, 818, 54, 46), "-")
-        self.tolerance_plus = Button(pygame.Rect(1015, 818, 54, 46), "+")
+
         self.color_buttons = [
-            ColorBucketButton((420, 841), 38),
-            ColorBucketButton((535, 841), 38),
-            ColorBucketButton((650, 841), 38),
+            ColorBucketButton((405, 840), 36),
+            ColorBucketButton((515, 840), 36),
+            ColorBucketButton((625, 840), 36),
         ]
+
+        self.shop_buttons = {
+            "tolerance": Button(pygame.Rect(780, 802, 205, 36), ""),
+            "speed": Button(pygame.Rect(995, 802, 215, 36), ""),
+            "buckets": Button(pygame.Rect(780, 846, 205, 36), ""),
+            "capacity": Button(pygame.Rect(995, 846, 215, 36), ""),
+        }
+        self.update_shop_buttons()
 
     def choose_file(self) -> Optional[str]:
         try:
@@ -374,6 +379,7 @@ class SandGame:
             self.picture.load(path)
             self.buckets.clear()
             self.pending_colors.clear()
+            self.queue_timer = 0.0
             self.reset_button.enabled = True
             self.refresh_color_choices()
             self.status = (
@@ -433,7 +439,7 @@ class SandGame:
 
     def update_choice_button_states(self) -> None:
         slots_used = len(self.buckets) + len(self.pending_colors)
-        can_add = self.picture.loaded and slots_used < MAX_BUCKETS
+        can_add = self.picture.loaded and slots_used < self.max_buckets
         for button, color in zip(self.color_buttons, self.choice_colors):
             button.color = color
             button.enabled = can_add and color is not None
@@ -442,14 +448,13 @@ class SandGame:
         picture = self.picture.pixel_rect
         return max(86, min(116, picture.width // 7)), 48
 
-    def make_bucket(self, color: Color) -> Bucket:
+    def make_bucket(self, color: Color) -> Optional[Bucket]:
         bucket_w, bucket_h = self.bucket_size()
-        matches = self.picture.matching_count(color, self.tolerance)
-        if matches < 8:
-            capacity = max(1, matches)
-        else:
-            capacity = min(220, max(8, int(matches * 0.35)))
+        available_matches = self.picture.matching_count(color, self.tolerance)
+        if available_matches <= 0:
+            return None
 
+        capacity = min(self.bucket_capacity, available_matches)
         return Bucket(
             x=float(TRACK_RECT.left),
             y=TRACK_RECT.centery - bucket_h // 2,
@@ -457,6 +462,7 @@ class SandGame:
             height=bucket_h,
             capacity=capacity,
             target_color=color,
+            speed=self.bucket_speed,
         )
 
     def spawn_area_clear(self, width: int, height: int, ignore: Optional[Bucket] = None) -> bool:
@@ -474,15 +480,20 @@ class SandGame:
         return True
 
     def request_bucket(self, color: Color) -> None:
-        if len(self.buckets) + len(self.pending_colors) >= MAX_BUCKETS:
-            self.status = "Three buckets are already active or queued."
+        if len(self.buckets) + len(self.pending_colors) >= self.max_buckets:
+            self.status = f"{self.max_buckets} buckets are already active or queued."
             return
 
         bucket = self.make_bucket(color)
+        if bucket is None:
+            self.status = "That color is no longer available."
+            self.refresh_color_choices()
+            return
+
         if self.spawn_area_clear(bucket.width, bucket.height):
             self.buckets.append(bucket)
             self.picture.physics_active = True
-            self.status = "Bucket spawned. It only eats colors inside the tolerance."
+            self.status = f"Bucket spawned ({bucket.capacity} capacity)."
         else:
             self.pending_colors.append(color)
             self.queue_timer = 0.0
@@ -491,7 +502,7 @@ class SandGame:
         self.refresh_color_choices()
 
     def process_spawn_queue(self, dt: float) -> None:
-        if not self.pending_colors or len(self.buckets) >= MAX_BUCKETS:
+        if not self.pending_colors or len(self.buckets) >= self.max_buckets:
             return
 
         self.queue_timer += dt
@@ -499,6 +510,13 @@ class SandGame:
             return
 
         bucket = self.make_bucket(self.pending_colors[0])
+        if bucket is None:
+            self.pending_colors.pop(0)
+            self.queue_timer = 0.0
+            self.status = "A queued color ran out before its bucket could spawn."
+            self.refresh_color_choices()
+            return
+
         if not self.spawn_area_clear(bucket.width, bucket.height):
             return
 
@@ -506,7 +524,7 @@ class SandGame:
         self.buckets.append(bucket)
         self.picture.physics_active = True
         self.queue_timer = 0.0
-        self.status = "Queued bucket entered the track."
+        self.status = f"Queued bucket entered the track ({bucket.capacity} capacity)."
         self.update_choice_button_states()
 
     def bucket_can_move_to(self, bucket: Bucket, new_x: float) -> bool:
@@ -519,7 +537,6 @@ class SandGame:
         return True
 
     def update_bucket_motion(self, bucket: Bucket, dt: float) -> bool:
-        """Move one bucket. Return False when it should disappear."""
         right_x = TRACK_RECT.right - bucket.width
 
         if bucket.waiting_for_wrap:
@@ -545,6 +562,62 @@ class SandGame:
             bucket.x = new_x
         return True
 
+    def shop_price(self, key: str) -> int:
+        base = SHOP_BASE_PRICE * (EXTRA_BUCKET_PRICE_MULTIPLIER if key == "buckets" else 1)
+        return base * (2 ** self.shop_levels[key])
+
+    def update_shop_buttons(self) -> None:
+        specs = {
+            "tolerance": "Tolerance +10",
+            "speed": "Speed +10%",
+            "buckets": "Buckets +1",
+            "capacity": "Capacity +100",
+        }
+        for key, button in self.shop_buttons.items():
+            if key == "buckets" and self.max_buckets >= MAX_BUCKET_LIMIT:
+                button.label = "Buckets MAX"
+                button.enabled = False
+                continue
+
+            price = self.shop_price(key)
+            button.label = f"{specs[key]}   {price}g"
+            button.enabled = self.gold >= price
+
+    def buy_upgrade(self, key: str) -> None:
+        if key == "buckets" and self.max_buckets >= MAX_BUCKET_LIMIT:
+            self.status = f"Maximum bucket count is {MAX_BUCKET_LIMIT}."
+            return
+
+        price = self.shop_price(key)
+        if self.gold < price:
+            self.status = f"Need {price} gold for that upgrade."
+            return
+
+        self.gold -= price
+
+        if key == "tolerance":
+            self.tolerance += 10
+            self.shop_levels[key] += 1
+            self.refresh_color_choices()
+            self.status = f"Tolerance upgraded to {self.tolerance}."
+        elif key == "speed":
+            self.bucket_speed *= 1.10
+            for bucket in self.buckets:
+                bucket.speed = self.bucket_speed
+            self.shop_levels[key] += 1
+            self.status = f"Bucket speed upgraded to {self.bucket_speed:.1f}."
+        elif key == "buckets":
+            self.max_buckets = min(MAX_BUCKET_LIMIT, self.max_buckets + 1)
+            self.shop_levels[key] += 1
+            self.update_choice_button_states()
+            self.status = f"Maximum buckets upgraded to {self.max_buckets}."
+        elif key == "capacity":
+            self.bucket_capacity += 100
+            self.shop_levels[key] += 1
+            self.status = f"Bucket capacity upgraded to {self.bucket_capacity}."
+
+        self.update_shop_buttons()
+
     def handle_event(self, event: pygame.event.Event) -> bool:
         if event.type == pygame.QUIT:
             return False
@@ -561,15 +634,12 @@ class SandGame:
                 self.load_image(path)
         elif self.reset_button.hit(pos):
             self.reset()
-        elif self.tolerance_minus.hit(pos):
-            self.tolerance = max(MIN_TOLERANCE, self.tolerance - TOLERANCE_STEP)
-            self.refresh_color_choices()
-            self.status = f"Color tolerance: {self.tolerance}"
-        elif self.tolerance_plus.hit(pos):
-            self.tolerance = min(MAX_TOLERANCE, self.tolerance + TOLERANCE_STEP)
-            self.refresh_color_choices()
-            self.status = f"Color tolerance: {self.tolerance}"
         else:
+            for key, button in self.shop_buttons.items():
+                if button.hit(pos):
+                    self.buy_upgrade(key)
+                    return True
+
             for button in self.color_buttons:
                 if button.hit(pos) and button.color is not None:
                     self.request_bucket(button.color)
@@ -590,11 +660,16 @@ class SandGame:
             self.status = f"{expired} bucket{'s' if expired != 1 else ''} expired after 3 loops."
         self.buckets = survivors
 
+        mined_this_update = 0
         self.scoop_accum += dt
         while self.scoop_accum >= SCOOP_INTERVAL:
             self.scoop_accum -= SCOOP_INTERVAL
             for bucket in self.buckets:
-                self.picture.scoop(bucket, self.tolerance, max_grains=5)
+                mined_this_update += self.picture.scoop(bucket, self.tolerance, max_grains=5)
+
+        if mined_this_update:
+            self.gold += mined_this_update
+            self.update_shop_buttons()
 
         full_count = sum(bucket.full for bucket in self.buckets)
         if full_count:
@@ -625,6 +700,19 @@ class SandGame:
         for x in range(TRACK_RECT.left + 25, TRACK_RECT.right - 10, 55):
             pygame.draw.circle(self.screen, TRACK, (x, y), 5)
 
+    def draw_shop(self) -> None:
+        pygame.draw.rect(self.screen, PANEL, SHOP_RECT, border_radius=14)
+        pygame.draw.rect(self.screen, (57, 63, 75), SHOP_RECT, 1, border_radius=14)
+
+        title = self.small_font.render("SHOP", True, MUTED)
+        self.screen.blit(title, (SHOP_RECT.left + 12, SHOP_RECT.top + 7))
+
+        gold_label = self.small_font.render(f"Gold: {self.gold}", True, GOLD)
+        self.screen.blit(gold_label, gold_label.get_rect(topright=(SHOP_RECT.right - 12, SHOP_RECT.top + 7)))
+
+        for button in self.shop_buttons.values():
+            button.draw(self.screen, self.tiny_font)
+
     def draw_hud(self) -> None:
         self.upload_button.draw(self.screen, self.font)
         self.reset_button.draw(self.screen, self.font)
@@ -635,30 +723,23 @@ class SandGame:
         if self.picture.loaded:
             stats = (
                 f"Sand: {self.picture.particle_count:,}/{self.picture.initial_particles:,}   "
-                f"Buckets: {len(self.buckets)}/{MAX_BUCKETS}   Queue: {len(self.pending_colors)}"
+                f"Buckets: {len(self.buckets)}/{self.max_buckets}   Queue: {len(self.pending_colors)}   "
+                f"Tol: {self.tolerance}   Cap: {self.bucket_capacity}"
             )
             stat_surf = self.small_font.render(stats, True, TEXT)
-            self.screen.blit(stat_surf, (430, 48))
+            self.screen.blit(stat_surf, (390, 48))
 
         choice_label = self.small_font.render(
             f"Choose a bucket color (samples bottom {SCOOP_ROWS} rows)",
             True,
             MUTED if self.picture.loaded else (92, 98, 111),
         )
-        self.screen.blit(choice_label, choice_label.get_rect(center=(535, 786)))
+        self.screen.blit(choice_label, choice_label.get_rect(center=(515, 785)))
 
         for button in self.color_buttons:
             button.draw(self.screen)
 
-        self.tolerance_minus.enabled = self.picture.loaded and self.tolerance > MIN_TOLERANCE
-        self.tolerance_plus.enabled = self.picture.loaded and self.tolerance < MAX_TOLERANCE
-        self.tolerance_minus.draw(self.screen, self.font)
-        self.tolerance_plus.draw(self.screen, self.font)
-
-        tol_label = self.font.render(f"Tolerance  {self.tolerance}", True, TEXT if self.picture.loaded else MUTED)
-        self.screen.blit(tol_label, tol_label.get_rect(center=(942, 841)))
-        tol_help = self.tiny_font.render("RGB distance", True, MUTED)
-        self.screen.blit(tol_help, tol_help.get_rect(center=(942, 869)))
+        self.draw_shop()
 
         status = self.small_font.render(self.status, True, MUTED)
         self.screen.blit(status, (50, 895))
