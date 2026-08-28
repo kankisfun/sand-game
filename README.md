@@ -5,18 +5,32 @@ A small Pygame prototype inspired by color-sand puzzle ads: upload any picture, 
 ## Current prototype
 
 - **Upload an image** with the button, or drag and drop an image onto the window.
-- The image is downscaled to at most **190 x 120 simulation cells**. Downscaling averages/merges source pixels so a large photo does not become millions of particles.
+- The image is downscaled to at most **190 x 120 simulation cells** so large photos do not become millions of particles.
 - Each non-transparent cell becomes one colored sand grain.
 - Sand uses a simple cellular automaton: grains try to fall down, then diagonally down-left/down-right.
 - The game samples the **bottom 5 sand rows** and offers **three color bucket buttons**.
-- Color choices deliberately try to be different: after the first pick, the chooser first looks for colors farther than **2x the current tolerance** from earlier picks, then **1x tolerance**, then falls back to any available color.
-- Clicking a color spawns a bucket of that color. A bucket only scoops grains within the current RGB color-distance tolerance.
-- Use the **- / + tolerance controls** to make matching stricter or looser.
-- Up to **3 buckets** can be active/queued. If the spawn area is occupied, new buckets wait briefly instead of overlapping.
-- Buckets travel across a track that extends beyond both sides of the picture, so the first and last image columns get a full pass.
-- At the right edge a bucket loops back to the left. If the left spawn area is occupied, it waits at the right edge until it can re-enter safely.
+- Color choices try to stay distinct: after the first pick, the chooser looks for colors farther than **2x tolerance**, then **1x tolerance**, then falls back to any available color.
+- Base RGB matching tolerance is **50**. Tolerance is no longer manually adjustable; it is upgraded in the shop.
+- Base bucket capacity is **100 grains**. When fewer matching grains than the current capacity remain anywhere on the board, a newly spawned bucket has its capacity reduced to that remaining matching count so it can still finish.
+- Base maximum bucket count is **2**. New buckets queue briefly if the spawn area is occupied.
+- Buckets travel across a track that extends beyond both sides of the picture and loop from right back to left.
 - A bucket disappears when it fills, or after **3 complete loops** without filling.
-- **Reset** restores the original sand picture and clears all buckets.
+- **Reset** restores the original sand picture and clears active buckets, while session gold and upgrades remain.
+
+## Gold and shop
+
+Every sand grain collected gives **1 gold**. The shop is in the bottom-right corner and upgrades persist for the current game session.
+
+| Upgrade | Effect | First cost |
+| --- | --- | ---: |
+| Tolerance | +10 RGB tolerance | 20 gold |
+| Speed | +10% bucket speed | 20 gold |
+| Buckets | +1 maximum bucket | 200 gold |
+| Capacity | +100 bucket capacity | 20 gold |
+
+Each upgrade doubles in price after every purchase. Normal upgrade prices therefore go **20, 40, 80, 160...** and bucket-slot prices go **200, 400, 800, 1600...**.
+
+Maximum bucket count is capped at **8**.
 
 ## Run it
 
@@ -41,18 +55,19 @@ Most balancing values are near the top of `app.py`:
 
 - `MAX_GRID_W` / `MAX_GRID_H` — maximum sand simulation resolution.
 - `PHYSICS_HZ` — falling-sand update rate.
-- `SCOOP_ROWS` — fixed number of bottom rows a bucket can eat (currently 5).
-- `BUCKET_SPEED` — bucket movement speed.
+- `SCOOP_ROWS` — fixed number of bottom rows a bucket can eat.
+- `BASE_BUCKET_SPEED` — starting bucket movement speed.
+- `BASE_BUCKET_CAPACITY` — starting bucket capacity.
+- `BASE_MAX_BUCKETS` / `MAX_BUCKET_LIMIT` — starting and maximum upgraded bucket limits.
+- `DEFAULT_TOLERANCE` — starting RGB matching tolerance.
 - `SCOOP_INTERVAL` — how often buckets attempt to collect matching grains.
-- `MAX_BUCKETS` — active/queued bucket limit.
-- `DEFAULT_TOLERANCE`, `TOLERANCE_STEP`, `MIN_TOLERANCE`, `MAX_TOLERANCE` — RGB matching controls.
 - `BUCKET_GAP` — minimum spacing used by the anti-overlap/queue logic.
-
-Bucket capacity is based on how many grains currently match the chosen color and tolerance, capped so a bucket does not become enormous.
+- `SHOP_BASE_PRICE` / `EXTRA_BUCKET_PRICE_MULTIPLIER` — shop economy values.
 
 ## Next ideas
 
 - Make grains physically pour through a bucket mouth instead of being sampled from the bottom band.
 - Quantize nearby source colors into cleaner game-like color groups before the sand simulation starts.
-- Add score/completion rules, combos, levels, sounds, bucket shake, and satisfying fill effects.
+- Add completion rules, combos, levels, sounds, bucket shake, and satisfying fill effects.
+- Save gold/upgrades between launches.
 - Move the simulation to NumPy or a shader if we want much higher particle counts.
